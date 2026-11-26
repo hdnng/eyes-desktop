@@ -1,0 +1,4 @@
+# Python packages (tkinter comes from your distribution: python3-tk / python3-tkinter / tk)
+numpy
+pillow
+python-xlib

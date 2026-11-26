@@ -32,10 +32,27 @@ THEMES = {  # same palette as the profile card
     "dark": dict(bg="#0f2027", art="#9fd8e6", value="#7ee0c8"),
     "light": dict(bg="#f6f8fa", art="#203a43", value="#0a7d6c"),
 }
-FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
-         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-         "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
-         "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf"]
+FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",       # Debian, Ubuntu
+         "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono-Bold.ttf",  # Fedora
+         "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",                     # Arch
+         "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
+         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"]
+
+
+def find_font():
+    """A bold monospace font file: a known DejaVu path, else whatever fontconfig suggests."""
+    for f in FONTS:
+        if os.path.exists(f):
+            return f
+    try:
+        import subprocess
+        out = subprocess.run(["fc-match", "-f", "%{file}", "monospace:bold"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        if out.endswith((".ttf", ".otf")) and os.path.exists(out):
+            return out
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
 
 
 def get_monitors(d):
@@ -58,9 +75,10 @@ class App:
         self.colors = dict(THEMES[cfg["theme"]])
         if cfg.get("background"):
             self.colors["bg"] = cfg["background"]
-        self.font = cfg.get("font") or next((f for f in FONTS if os.path.exists(f)), None)
+        self.font = cfg.get("font") or find_font()
         if not self.font:
-            sys.exit("No DejaVu Sans Mono font found; install fonts-dejavu-core or set \"font\" in config.json")
+            sys.exit("No monospace font found: install DejaVu Sans Mono (fonts-dejavu-core) "
+                     "or set \"font\" in config.json")
 
         self.x = xdisplay.Display()
         self.atom_type = self.x.intern_atom("_NET_WM_WINDOW_TYPE")

@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Make the eye wallpaper start on login (current user only, nothing system-wide), then start it now.
+# Make the wallpaper start on login (current user only, nothing system-wide), then start it now.
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 FILE="$AUTOSTART/eyes-desktop.desktop"
 
 if ! python3 -c "import tkinter, PIL.ImageTk, Xlib, numpy" 2>/dev/null; then
-  echo "Missing packages. Install them once with:"
-  echo "  sudo apt install python3-tk python3-pil python3-pil.imagetk python3-xlib python3-numpy"
+  echo "Missing Python packages. Install them once, for example:"
+  echo "  Debian/Ubuntu: sudo apt install python3-tk python3-pil python3-pil.imagetk python3-xlib python3-numpy"
+  echo "  Fedora:        sudo dnf install python3-tkinter python3-pillow-tk python3-xlib python3-numpy"
+  echo "  Arch:          sudo pacman -S tk python-pillow python-xlib python-numpy"
   exit 1
 fi
 if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
-  echo "Note: this is a Wayland session; the eye only follows the mouse fully under 'Ubuntu on Xorg'."
+  echo "Note: this is a Wayland session. The wallpaper runs, but the eyes can only follow the mouse"
+  echo "everywhere in an X11 session (on Ubuntu: 'Ubuntu on Xorg' on the login screen)."
 fi
 
 chmod +x "$DIR/start.sh" "$DIR/stop.sh" "$DIR/uninstall.sh"

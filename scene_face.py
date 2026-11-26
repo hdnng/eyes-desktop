@@ -577,7 +577,7 @@ class FaceScene:
             fib = 0.5 + 0.25 * np.sin(ph * 34 + 2.5 * np.sin(ph * 7) + t * 3.0) \
                 + 0.25 * np.sin(ph * 71 + 1.7 + 6.0 * t)
             # kept in the mid tones so the fibres show as glyphs in both themes
-            iv = 0.2 + 0.6 * (0.4 * O + 0.6 * fib * (0.55 + 0.45 * t))
+            iv = 0.3 + 0.62 * (0.4 * O + 0.6 * fib * (0.55 + 0.45 * t))
             iv = iv + 0.14 * np.exp(-((t - 0.33) / 0.07) ** 2)        # collarette
             iv = iv * (1 - 0.6 * smoothstep(0.8, 1.0, t))               # dark limbal ring
             iv = iv * (0.5 + 0.5 * smoothstep(0.0, 0.12, t))            # pupil rim
