@@ -97,15 +97,21 @@ python3 eyes.py --window
 ./install.sh
 ```
 
-`install.sh` tạo file `~/.config/autostart/eyes-desktop.desktop` (chỉ cho tài khoản của bạn, không sửa gì toàn hệ thống) rồi bật hình nền. Sau đó đừng di chuyển thư mục, vì mục tự chạy trỏ vào đúng đường dẫn này.
+`install.sh` làm ba việc, đều chỉ cho tài khoản của bạn (không sửa gì toàn hệ thống):
+
+- tạo file `~/.config/autostart/eyes-desktop.desktop` để hình nền tự chạy mỗi lần đăng nhập;
+- trên GNOME, đặt hình nền gốc của hệ thống thành một khung hình tĩnh của bức tranh, để màn hình tổng quan (vuốt ba ngón) và màn hình khoá khớp với hình nền động. Hình nền cũ được lưu lại trước, và `./uninstall.sh` sẽ trả lại. Dùng `./install.sh --keep-wallpaper` nếu muốn giữ nguyên hình nền cũ;
+- bật hình nền.
+
+Sau đó đừng di chuyển thư mục, vì mục tự chạy trỏ vào đúng đường dẫn này.
 
 Các lệnh hằng ngày:
 
 | Lệnh | Tác dụng |
 |---|---|
-| `./start.sh` | bật hoặc khởi động lại hình nền, ví dụ sau khi sửa `config.json` |
+| `./start.sh` | bật hoặc khởi động lại hình nền, ví dụ sau khi sửa `config.json` (đồng thời làm mới ảnh tĩnh cho màn tổng quan) |
 | `./stop.sh` | tắt |
-| `./uninstall.sh` | tắt và bỏ tự chạy |
+| `./uninstall.sh` | tắt, bỏ tự chạy và trả lại hình nền cũ |
 
 Log nằm ở `~/.cache/eyes-desktop.log`.
 
@@ -197,6 +203,7 @@ Tóc tốn nhiều nhất. Muốn nhẹ hơn, giảm `ambient_fps` (ví dụ 8),
 | Mắt không nhìn theo chuột | Chạy `echo $XDG_SESSION_TYPE`. Nếu ra `wayland`, đăng nhập bằng phiên X11 (xem phần Yêu cầu). |
 | Icon desktop biến mất hoặc che hình nền | Với extension icon desktop (ví dụ Desktop Icons NG của GNOME), thứ tự lớp phụ thuộc thứ tự khởi động. Chạy lại `./start.sh` sau khi đăng nhập xong. Click vào mặt nước có thể bị lớp icon nhận thay. |
 | `No monospace font found` | Cài DejaVu Sans Mono (`fonts-dejavu-core` trên Debian/Ubuntu), hoặc đặt `"font"` trong `config.json`. |
+| Vuốt ba ngón vào màn tổng quan, hoặc ở màn hình khoá, vẫn thấy hình nền cũ | GNOME vẽ những màn đó từ cài đặt hình nền của nó, không dùng cửa sổ hình nền động. Chạy `./install.sh` (không có `--keep-wallpaper`) để đặt hình nền đó thành ảnh tĩnh của bức tranh. Tự tạo ảnh tĩnh: `python3 eyes.py --snapshot still.png` |
 | Log có `note: direct X drawing unavailable` | Màn hình không phải 24-bit TrueColor nên chương trình dùng ảnh Tk thay thế. Vẫn chạy bình thường, chỉ tốn CPU hơn. |
 | Lỗi khác | Xem `~/.cache/eyes-desktop.log`. |
 

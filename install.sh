@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Make the wallpaper start on login (current user only, nothing system-wide), then start it now.
+# Also sets the desktop's own wallpaper to a still frame of the picture, so the activities
+# overview matches; pass --keep-wallpaper to leave it alone. uninstall.sh puts the old one back.
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
+STATIC=1
+for arg in "$@"; do
+  [ "$arg" = "--keep-wallpaper" ] && STATIC=0
+done
 AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 FILE="$AUTOSTART/eyes-desktop.desktop"
 
@@ -17,7 +23,7 @@ if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
   echo "everywhere in an X11 session (on Ubuntu: 'Ubuntu on Xorg' on the login screen)."
 fi
 
-chmod +x "$DIR/start.sh" "$DIR/stop.sh" "$DIR/uninstall.sh"
+chmod +x "$DIR/start.sh" "$DIR/stop.sh" "$DIR/uninstall.sh" "$DIR/tools/static_wallpaper.sh"
 mkdir -p "$AUTOSTART"
 cat >"$FILE" <<EOF
 [Desktop Entry]
@@ -30,4 +36,7 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=3
 EOF
 echo "Autostart entry written: $FILE"
-"$DIR/start.sh"
+EYES_SET_STATIC=$STATIC "$DIR/start.sh"
+if [ "$STATIC" = 1 ]; then
+  echo "The activities overview will show a still of the picture in a moment (old wallpaper is saved)."
+fi

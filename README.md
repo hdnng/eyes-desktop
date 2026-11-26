@@ -97,15 +97,21 @@ Make it your wallpaper, now and at every login:
 ./install.sh
 ```
 
-`install.sh` writes `~/.config/autostart/eyes-desktop.desktop` (your user only, nothing system-wide) and starts the wallpaper. Keep the folder where it is afterwards: the autostart entry points to it.
+`install.sh` does three things, all for your user only (nothing system-wide):
+
+- writes `~/.config/autostart/eyes-desktop.desktop`, so the wallpaper starts at every login;
+- on GNOME, sets the desktop's own wallpaper to a still frame of the picture, so the activities overview and the lock screen match. It saves your old wallpaper first, and `./uninstall.sh` puts it back. Use `./install.sh --keep-wallpaper` to leave your wallpaper alone;
+- starts the wallpaper.
+
+Keep the folder where it is afterwards: the autostart entry points to it.
 
 Everyday commands:
 
 | Command | What it does |
 |---|---|
-| `./start.sh` | (re)start the wallpaper, for example after editing `config.json` |
+| `./start.sh` | (re)start the wallpaper, for example after editing `config.json` (also refreshes the still used by the overview) |
 | `./stop.sh` | stop it |
-| `./uninstall.sh` | stop it and remove it from autostart |
+| `./uninstall.sh` | stop it, remove it from autostart and restore your previous desktop wallpaper |
 
 The log is in `~/.cache/eyes-desktop.log`.
 
@@ -197,6 +203,7 @@ The hair costs the most. For less CPU, lower `ambient_fps` (e.g. 8), raise `cell
 | The eyes do not follow the mouse | Check `echo $XDG_SESSION_TYPE`. If it says `wayland`, log in with an X11 session (see Requirements). |
 | Desktop icons disappear or cover the wallpaper | With a desktop-icons extension (e.g. GNOME's Desktop Icons NG), stacking depends on start order. Run `./start.sh` again after logging in. Clicks on the water may go to the icons layer instead. |
 | `No monospace font found` | Install DejaVu Sans Mono (`fonts-dejavu-core` on Debian/Ubuntu), or set `"font"` in `config.json`. |
+| The activities overview (three-finger swipe) or the lock screen shows the old wallpaper | GNOME draws those from its own wallpaper setting, not from the live window. Run `./install.sh` (without `--keep-wallpaper`) to set that wallpaper to a still of the picture. To make a still yourself: `python3 eyes.py --snapshot still.png` |
 | `note: direct X drawing unavailable` in the log | The display is not 24-bit TrueColor, so Tk images are used instead. Everything works, just with more CPU. |
 | Anything else | Look in `~/.cache/eyes-desktop.log`. |
 

@@ -262,9 +262,32 @@ _XImage = _ximage_struct()
 def make_canvas(widget, *args, **kw):
     """The fastest glyph canvas this display supports."""
     import os
+    if widget is None:
+        return BufferCanvas(widget, *args, **kw)
     if os.environ.get("EYES_RENDERER") != "tk":
         try:
             return XImageCanvas(widget, *args, **kw)
         except Exception as exc:                                       # pragma: no cover
             print(f"note: direct X drawing unavailable ({exc}); using Tk images", flush=True)
     return TiledCanvas(widget, *args, **kw)
+
+
+class BufferCanvas:
+    """No window at all: keeps the rendered frame in memory (for still snapshots)."""
+
+    def __init__(self, widget, gs, rows, cols, x0, y0, bg, palette, tile=None):
+        self.gs, self.rows, self.cols, self.x0, self.y0 = gs, rows, cols, x0, y0
+        self.bg = np.array(bg, np.float32)
+        self.set_palette(palette)
+
+    def set_palette(self, palette):
+        pal = np.asarray(palette, np.float32)
+        a = self.gs.atlas.astype(np.float32)[None, :, :, :, None] / 255
+        bg = self.bg[None, None, None, None, :]
+        self.catlas = (bg + a * (pal[:, None, None, None, :] - bg)).round().astype(np.uint8)
+
+    def show(self, glyphs, colors):
+        gs = self.gs
+        px = self.catlas[colors, glyphs].transpose(0, 2, 1, 3, 4)
+        self.image = Image.fromarray(px.reshape(self.rows * gs.ch, self.cols * gs.cw, 3))
+        return 1

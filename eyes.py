@@ -223,6 +223,52 @@ class App:
         self.root.mainloop()
 
 
+def snapshot(cfg, out, resolution):
+    """Render one still frame of the wallpaper at the primary monitor's size into a PNG.
+    Used as the desktop environment's own wallpaper, which shows in the activities overview
+    and other places the live window does not reach."""
+    from PIL import Image
+    colors = dict(THEMES[cfg["theme"]])
+    if cfg.get("background"):
+        colors["bg"] = cfg["background"]
+    font = cfg.get("font") or find_font()
+    if not font:
+        sys.exit("No monospace font found")
+    if resolution:
+        w, h = (int(v) for v in resolution.lower().split("x"))
+    else:
+        try:
+            mons = get_monitors(xdisplay.Display())
+            m = next((m for m in mons if m["primary"]), mons[0])
+            w, h = m["w"], m["h"]
+        except Exception:
+            w, h = 1920, 1080
+    mon = dict(x=0, y=0, w=w, h=h, primary=True)
+    bg = tuple(int(colors["bg"][i:i + 2], 16) for i in (1, 3, 5))
+    frame = Image.new("RGB", (w, h), bg)
+    if cfg["scene"] == "eye":
+        from scene_eye import EyeArt
+        import json as _json
+        eye = _json.loads((ROOT / "assets" / "eye.json").read_text())
+        aw, ah = eye["cols"] * eye["cell_w"], eye["rows"] * eye["cell_h"]
+        art = EyeArt(eye, min(cfg["size"] * h / ah, 0.92 * w / aw), colors, font)
+        img = art.base.copy()
+        img.paste(art.compose(0, 0, 1.0, None, cfg["theme"] == "light"), art.box[:2])
+        frame.paste(img, ((w - img.width) // 2, (h - img.height) // 2))
+    else:
+        from scene_face import FaceScene
+        scene = FaceScene(cfg, colors, font, None)
+        scene.layout(mon)
+        now = time.monotonic()
+        beh = Behaviour(cfg["idle_after"], now)
+        beh.next_blink = now + 60                     # eyes open
+        beh.update(now, 1 / 24, None, (w, h), scene.focus)
+        scene.frame(now, 1 / 24, beh)
+        frame.paste(scene.tiles.image, scene.origin)
+    frame.save(out)
+    print(f"wrote {out} ({w}x{h})")
+
+
 def load_config(args):
     cfg = dict(DEFAULTS)
     path = Path(args.config) if args.config else ROOT / "config.json"
@@ -250,7 +296,12 @@ def main():
     ap.add_argument("--fps", type=int)
     ap.add_argument("--config", help="path to a config.json")
     ap.add_argument("--window", action="store_true", help="run in a normal 1280x720 window, for trying it out")
+    ap.add_argument("--snapshot", metavar="OUT.png", help="write one still frame to a PNG and exit")
+    ap.add_argument("--resolution", metavar="WxH", help="with --snapshot: image size (default: primary monitor)")
     args = ap.parse_args()
+    if args.snapshot:
+        snapshot(load_config(args), args.snapshot, args.resolution)
+        return
     if os.environ.get("XDG_SESSION_TYPE") == "wayland":
         print("warning: Wayland session - the pointer is only visible over X windows, so the eyes will mostly "
               "play their idle routine. Log in with 'Ubuntu on Xorg' for full mouse tracking.", file=sys.stderr)
