@@ -5,9 +5,9 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 FILE="$AUTOSTART/eyes-desktop.desktop"
 
-if ! python3 -c "import tkinter, PIL.ImageTk, Xlib" 2>/dev/null; then
+if ! python3 -c "import tkinter, PIL.ImageTk, Xlib, numpy" 2>/dev/null; then
   echo "Missing packages. Install them once with:"
-  echo "  sudo apt install python3-tk python3-pil python3-pil.imagetk python3-xlib"
+  echo "  sudo apt install python3-tk python3-pil python3-pil.imagetk python3-xlib python3-numpy"
   exit 1
 fi
 if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
@@ -20,7 +20,7 @@ cat >"$FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Eyes Desktop
-Comment=ASCII eye wallpaper that follows the mouse
+Comment=ASCII face wallpaper that follows the mouse
 Exec="$DIR/start.sh"
 Terminal=false
 X-GNOME-Autostart-enabled=true

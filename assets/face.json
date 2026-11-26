@@ -1,0 +1,10 @@
+{
+  "source": "avatar.png",
+  "eyes": [
+    {"center": [65, 248], "a": 66, "b": 22, "angle": -20, "iris": [62, 245, 18]},
+    {"center": [350, 189], "a": 69, "b": 19, "angle": -9, "iris": [352, 187, 20]}
+  ],
+  "water": {"top": 292, "full": 330},
+  "hair": {"bottom": 140},
+  "stars": {"bottom": 175, "max": 28}
+}
