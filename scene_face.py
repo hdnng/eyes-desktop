@@ -1,17 +1,19 @@
-"""Scene 'face': the GitHub avatar redrawn in ASCII, alive.
+"""Scene 'face': the GitHub avatar redrawn in ASCII, alive, filling the screen.
 
 Every frame the avatar is resampled through a displacement field and turned into glyphs:
 
-  eyes      the inside of each eye opening is warped so the iris slides towards the pointer
-            (lids stay put), the pupil swells or narrows, and the upper lid slides down to
-            squint and blink, with a dark lash line on its edge
-  water     the water in the lower half sways, and rings spread from clicks and from the
-            pointer gliding over it
-  hair      drifts slowly
+  eyes      each eyeball is painted afresh: shaded white with the upper lid's shadow, an iris
+            built from the drawing's own iris (re-mapped in polar coordinates so the pupil can
+            widen) plus fine radial fibres, a dark limbal ring and catchlights. The iris slides
+            behind the real lid lines, foreshortens towards the corners, and the upper lid
+            slides down with its lashes to squint and blink
+  hair      strands sway along their own direction, tips more than roots, in gusts; moving
+            the pointer through the hair brushes it aside and it springs back
+  water     the water sways, and rings spread from clicks and from the pointer gliding over it
   stars     the white specks in the hair twinkle
-  light     a soft glow follows the pointer across the face
+  light     a soft glow follows the pointer
 
-Geometry (eye ellipses, water line...) is in avatar pixels in assets/face.json.
+Geometry (lid curves, iris, hair regions, water line) is in avatar pixels in assets/face.json.
 """
 import json
 import math
@@ -19,13 +21,13 @@ import random
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
-from ascii_render import GlyphSet, TiledCanvas, dither_for, SUB_X, SUB_Y
+from ascii_render import GlyphSet, make_canvas, dither_for, SUB_X, SUB_Y
 from behaviour import Follower
 
 ROOT = Path(__file__).resolve().parent
-GAZE_U, GAZE_V = 0.30, 0.25        # largest iris travel, as a fraction of the eye's half axes
+UP = 2                              # the avatar is upscaled this much before sampling
 
 
 def smoothstep(e0, e1, x):
@@ -42,9 +44,10 @@ def mix(a, b, t):
 
 
 def prepare(path):
-    """The avatar as float greyscale with its tones spread out and its lines sharpened."""
+    """The avatar, upscaled, tones spread out and lines sharpened, as floats 0..1."""
     im = ImageOps.equalize(Image.open(path).convert("L"))
-    im = im.filter(ImageFilter.UnsharpMask(radius=8, percent=180, threshold=0))
+    im = im.resize((im.width * UP, im.height * UP), Image.LANCZOS)
+    im = im.filter(ImageFilter.UnsharpMask(radius=12, percent=170, threshold=0))
     a = np.asarray(im, np.float32) / 255
     lo, hi = np.percentile(a, [1, 99])
     return np.clip((a - lo) / (hi - lo), 0, 1)
@@ -66,8 +69,7 @@ def find_stars(path, bottom, limit):
     return stars
 
 
-def sample(img, X, Y):
-    """Bilinear sample of img at float coordinates (clamped at the border)."""
+def _bilinear(img, X, Y):
     h, w = img.shape
     X = np.clip(X, 0, w - 1.001)
     Y = np.clip(Y, 0, h - 1.001)
@@ -78,88 +80,192 @@ def sample(img, X, Y):
     return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy
 
 
+def sample(img, X, Y):
+    """Bilinear sample of the (upscaled) avatar at avatar-px coordinates."""
+    return _bilinear(img, X * UP + (UP - 1) / 2, Y * UP + (UP - 1) / 2)
+
+
+def sample_plain(img, X, Y):
+    """Bilinear sample of an avatar-sized array (no upscale)."""
+    return _bilinear(img, X, Y)
+
+
+class Eye:
+    """One eye's geometry from face.json, in avatar px."""
+
+    def __init__(self, g, src):
+        self.ux, self.uy = (np.array(v, np.float32) for v in zip(*g["upper"]))
+        self.lx, self.ly = (np.array(v, np.float32) for v in zip(*g["lower"]))
+        self.xl, self.xr = float(self.ux[0]), float(self.ux[-1])
+        (x0, y0), (x1, y1) = g["upper"][0], g["upper"][-1]
+        self.theta = math.atan2(y1 - y0, x1 - x0)
+        self.cos, self.sin = math.cos(self.theta), math.sin(self.theta)
+        self.cx, self.cy = (x0 + x1) / 2, (y0 + y1) / 2
+        self.half = math.hypot(x1 - x0, y1 - y0) / 2
+        self.ix, self.iy, self.r = g["iris"]
+        lid = g.get("lid", {})
+        self.lash, self.skin_h = float(lid.get("lash", 8)), float(lid.get("skin", 10))
+        # tones of the drawing's own white and iris, so the painted eye matches its surroundings
+        pts = [(x, y) for x in range(int(self.xl), int(min(self.xr, 412)))
+               for y in range(int(self.top(x)) + 2, int(self.bottom(x)) - 1)]
+        self.sclera, self.iris_lo, self.iris_hi = 0.85, 0.15, 0.55
+        # the skin just under the lower lid gives the closed lid its tone
+        sk = [(x, y) for x in range(int(self.xl) + 4, int(min(self.xr, 412)) - 4, 2)
+              for y in range(int(self.bottom(x)) + 4, int(self.bottom(x)) + 14, 2)]
+        self.skin = float(np.percentile(sample(src, *np.array(sk, np.float32).T), 60)) if sk else 0.6
+        if pts:
+            px, py = np.array(pts, np.float32).T
+            v = sample(src, px, py)
+            d2 = (px - self.ix) ** 2 + (py - self.iy) ** 2
+            iris, out = d2 < (self.r * 0.9) ** 2, d2 > (self.r * 1.25) ** 2
+            if out.any():
+                self.sclera = float(np.percentile(v[out], 75))
+            if iris.any():
+                self.iris_lo = float(np.percentile(v[iris], 10))
+                self.iris_hi = float(np.percentile(v[iris], 90))
+
+    def top(self, x):
+        return np.interp(x, self.ux, self.uy)
+
+    def bottom(self, x):
+        return np.interp(x, self.lx, self.ly)
+
+
 class FaceScene:
     def __init__(self, cfg, colors, font, canvas):
         self.cfg, self.font, self.canvas = cfg, font, canvas
         self.geo = json.loads((ROOT / "assets" / "face.json").read_text())
         src_path = ROOT / "assets" / self.geo["source"]
         self.src = prepare(src_path)
-        self.size = self.src.shape[0]
+        self.size = self.src.shape[0] // UP
         self.light = cfg["theme"] == "light"
-        # tone curve, as a lookup table: an S-curve for contrast around the skin's mid greys.
-        # Dark theme draws bright parts dense; light theme draws dark parts dense.
+        self.fx = dict(dict(water=True, ripples=True, hair=True, stars=True, glow=True), **cfg.get("effects", {}))
+        self.hair_strength = float(cfg.get("hair_strength", 3.5))
+        st = self.geo["stars"]
+        self.stars = find_stars(src_path, st["bottom"], st["max"]) if self.fx["stars"] else []
+        self.eyes = [Eye(g, self.src) for g in self.geo["eyes"]]
+        self.follow = [Follower() for _ in self.eyes]
+        self.ripples, self.brushes = [], []
+        self.last_wake = self.last_brush = 0.0
+        self.prev_ptr = None
+
+        # hair: a soft mask per region, with the direction its strands run (root -> tip)
+        n = self.size
+        self.hair = []
+        for h in self.geo.get("hair", []):
+            m = Image.new("L", (n, n), 0)
+            ImageDraw.Draw(m).polygon([tuple(p) for p in h["polygon"]], fill=255)
+            m = np.asarray(m.filter(ImageFilter.GaussianBlur(6)), np.float32) / 255
+            d = np.array(h["direction"], np.float32)
+            d /= np.linalg.norm(d)
+            self.hair.append(dict(mask=m, root=np.array(h["root"], np.float32), t=d,
+                                  n=np.array([-d[1], d[0]], np.float32), reach=float(h.get("reach", 300))))
+        self.hair_any = sum((h["mask"] for h in self.hair), np.zeros((n, n), np.float32)).clip(0, 1)
+
+        # tone curve as a lookup table: an S-curve for contrast around the skin's mid greys
         x = np.linspace(0, 1, 256, dtype=np.float32)
         sig = lambda v: 1 / (1 + np.exp(-7 * (v - 0.5)))
         sc = lambda v: (sig(v) - sig(0)) / (sig(1) - sig(0))
         self.tone = (sc(1 - x) ** 1.1 if self.light else sc(x) ** 1.3).astype(np.float32)
-        self.fx = dict(dict(water=True, ripples=True, hair=True, stars=True, glow=True), **cfg.get("effects", {}))
-        st = self.geo["stars"]
-        self.stars = find_stars(src_path, st["bottom"], st["max"]) if self.fx["stars"] else []
-        self.star_phase = [(random.uniform(0, 6.3), random.uniform(1.6, 4.5)) for _ in self.stars]
-        self.eyes = self.geo["eyes"]
-        self.follow = [Follower() for _ in self.eyes]
-        self.ripples = []
-        self.last_wake = 0.0
-        self.bands, self.next_amb, self.last_sig = [], 0.0, None
-        self.eye_cache = [None] * len(self.eyes)
 
         bg, art, value = rgb(colors["bg"]), rgb(colors["art"]), rgb(colors["value"])
         hi = (255, 255, 255) if not self.light else rgb("#0969da")
-        # colour ids: 0 art, 1 iris, 2-4 pointer glow, 5 twinkling star
+        # colour ids: 0 art, 1 iris, 2-4 pointer glow, 5 sparkle (stars, catchlights)
         self.bg = bg
-        self.palette = [art, value, mix(art, hi, 0.25), mix(art, hi, 0.5), mix(art, hi, 0.75),
-                        (255, 255, 255) if not self.light else rgb("#0969da")]
+        self.palette = [art, value, mix(art, hi, 0.25), mix(art, hi, 0.5), mix(art, hi, 0.75), hi]
 
     # ------------------------------------------------------------ layout
     def layout(self, mon):
         cfg, n = self.cfg, self.size
-        side = min(cfg.get("face_size", 0.92) * mon["h"], mon["h"], 0.96 * mon["w"])
         cw = max(3, round(cfg.get("cell", 5) * mon["h"] / 1080))
         ch = 2 * cw
-        self.cols, self.rows = int(side // cw), int(side // ch)
-        W, H = self.cols * cw, self.rows * ch
-        px, py = cfg["position"]
-        ox = round(min(max(mon["x"] + px * mon["w"] - W / 2, mon["x"]), mon["x"] + mon["w"] - W))
-        oy = round(min(max(mon["y"] + py * mon["h"] - H / 2, mon["y"]), mon["y"] + mon["h"] - H))
-        self.origin, self.px_size = (ox, oy), (W, H)
+        fit = cfg.get("fit", "cover")
+        if fit == "cover":                   # fill the whole monitor, cropping the avatar
+            W, H = mon["w"], mon["h"]
+            s = max(W / n, H / n)
+            self.cols, self.rows = W // cw, H // ch
+            gw, gh = self.cols * cw, self.rows * ch
+            vw, vh = gw / s, gh / s
+            fx, fy = cfg.get("focus") or self.geo.get("focus", [0.5, 0.5])
+            vx = min(max(fx * n - vw / 2, 0), n - vw)
+            vy = min(max(fy * n - vh / 2, 0), n - vh)
+            ox, oy = mon["x"] + (W - gw) // 2, mon["y"] + (H - gh) // 2
+        else:                                # the whole square, centred
+            side = min(cfg.get("face_size", 0.92) * mon["h"], mon["h"], 0.96 * mon["w"])
+            self.cols, self.rows = int(side // cw), int(side // ch)
+            gw, gh = self.cols * cw, self.rows * ch
+            px, py = cfg["position"]
+            ox = round(min(max(mon["x"] + px * mon["w"] - gw / 2, mon["x"]), mon["x"] + mon["w"] - gw))
+            oy = round(min(max(mon["y"] + py * mon["h"] - gh / 2, mon["y"]), mon["y"] + mon["h"] - gh))
+            vx, vy, vw, vh = 0.0, 0.0, float(n), float(n)
+            s = gw / n
+        self.view = (vx, vy, vw, vh)
+        self.origin, self.scale = (ox, oy), s
 
         self.gs = GlyphSet(self.font, cw, ch)
         fh, fw = self.rows * SUB_Y, self.cols * SUB_X
-        xs = (np.arange(fw, dtype=np.float32) + 0.5) / fw * n - 0.5
-        ys = (np.arange(fh, dtype=np.float32) + 0.5) / fh * n - 0.5
+        xs = vx + (np.arange(fw, dtype=np.float32) + 0.5) / fw * vw - 0.5
+        ys = vy + (np.arange(fh, dtype=np.float32) + 0.5) / fh * vh - 0.5
         self.X0, self.Y0 = np.meshgrid(xs, ys)
         self.dither = dither_for((fh, fw)).astype(np.float32)
-        # fade the square's edges into the background
-        u = np.minimum(xs, n - 1 - xs) / n
-        v = np.minimum(ys, n - 1 - ys) / n
-        self.vignette = (smoothstep(0.0, 0.07, v)[:, None] * smoothstep(0.0, 0.07, u)[None, :]).astype(np.float32)
-        # cell centres in avatar px, for colouring
-        cx = (np.arange(self.cols, dtype=np.float32) + 0.5) / self.cols * n
-        cy = (np.arange(self.rows, dtype=np.float32) + 0.5) / self.rows * n
+        if fit == "cover":                   # a gentle fade at the top and bottom edges
+            e = np.minimum(np.arange(fh), fh - 1 - np.arange(fh)) / fh
+            self.vignette = np.repeat((0.35 + 0.65 * smoothstep(0, 0.05, e))[:, None], fw, 1).astype(np.float32)
+        else:                                # fade the square's edges into the background
+            u = np.minimum(xs, n - 1 - xs) / n
+            v = np.minimum(ys, n - 1 - ys) / n
+            self.vignette = (smoothstep(0.0, 0.07, v)[:, None] * smoothstep(0.0, 0.07, u)[None, :]).astype(np.float32)
+        cx = vx + (np.arange(self.cols, dtype=np.float32) + 0.5) / self.cols * vw
+        cy = vy + (np.arange(self.rows, dtype=np.float32) + 0.5) / self.rows * vh
         self.CX, self.CY = np.meshgrid(cx, cy)
 
         wat = self.geo["water"]
         self.water_r0 = int(np.searchsorted(ys, wat["top"]))
         self.water_w = smoothstep(wat["top"], wat["full"], self.Y0[self.water_r0:]).astype(np.float32)
-        self.hair_r1 = int(np.searchsorted(ys, self.geo["hair"]["bottom"]))
-        self.hair_w = (1 - ys[:self.hair_r1] / self.geo["hair"]["bottom"]).astype(np.float32)[:, None]
+
+        # hair: the rows it covers, and per region its weight and strand coordinates there
+        self.hair_rows, self.hair_band = None, []
+        if self.hair:
+            rows = np.nonzero((sample_plain(self.hair_any, self.X0, self.Y0) > 0.01).any(1))[0]
+            if len(rows):
+                a, b = int(rows[0]), int(rows[-1]) + 1
+                self.hair_rows = (a - a % SUB_Y, min(fh, b + (-b) % SUB_Y))
+                hx = self.X0[self.hair_rows[0]:self.hair_rows[1]]
+                hy = self.Y0[self.hair_rows[0]:self.hair_rows[1]]
+                for h in self.hair:
+                    m = sample_plain(h["mask"], hx, hy)
+                    rr, cc = np.nonzero(m > 0.01)
+                    if not len(rr):
+                        continue
+                    box = (slice(int(rr.min()), int(rr.max()) + 1), slice(int(cc.min()), int(cc.max()) + 1))
+                    bx, by = hx[box], hy[box]          # only where this region has hair
+                    along = (bx - h["root"][0]) * h["t"][0] + (by - h["root"][1]) * h["t"][1]
+                    across = (bx - h["root"][0]) * h["n"][0] + (by - h["root"][1]) * h["n"][1]
+                    ramp = smoothstep(0.05 * h["reach"], 0.85 * h["reach"], along)
+                    self.hair_band.append((box, (m[box] * ramp).astype(np.float32),
+                                           along.astype(np.float32), across.astype(np.float32), h))
+                self.hair_m = sample_plain(self.hair_any, hx, hy)
 
         # per eye: a window of whole cells around it (cell slices and feature slices)
         self.eye_cells, self.eye_win = [], []
         for e in self.eyes:
-            r = max(e["a"], e["b"]) + 4
-            cells = self.cell_rect(e["center"][0] - r, e["center"][1] - r - 12, e["center"][0] + r, e["center"][1] + r)
+            cells = self.cell_rect(e.xl - 3, float(e.uy.min()) - 16, e.xr + 3, float(e.ly.max()) + 3)
             self.eye_cells.append(cells)
             self.eye_win.append(self.feat(cells))
-        self.star_cells = [(min(self.rows - 1, int(y / n * self.rows)), min(self.cols - 1, int(x / n * self.cols)))
-                           for x, y in self.stars]
+        self.star_cells, self.star_phase = [], []
+        for x, y in self.stars:
+            r, c = (y - vy) / vh * self.rows, (x - vx) / vw * self.cols
+            if 0 <= r < self.rows and 0 <= c < self.cols:
+                self.star_cells.append((int(r), int(c)))
+                self.star_phase.append((random.uniform(0, 6.3), random.uniform(1.6, 4.5)))
 
-        self.tiles = TiledCanvas(self.canvas, self.gs, self.rows, self.cols, ox, oy, self.bg, self.palette)
-        s = W / n
-        self.scale = s
-        self.eye_screen = [(ox + e["center"][0] * s, oy + e["center"][1] * s) for e in self.eyes]
-        self.focus = (ox + W / 2, oy + 0.55 * H)
-        # the still picture; animated row bands are recomputed on top of it
+        if getattr(self, "tiles", None) is not None and hasattr(self.tiles, "close"):
+            self.tiles.close()
+        self.tiles = make_canvas(self.canvas, self.gs, self.rows, self.cols, ox, oy, self.bg, self.palette)
+        self.eye_screen = [self.to_screen(e.ix, e.iy) for e in self.eyes]
+        self.focus = self.to_screen(*np.mean([(e.ix, e.iy) for e in self.eyes], axis=0))
+
+        # the still picture; animated row bands and the eyes are recomputed on top of it
         allw = (slice(None), slice(None))
         self.I0 = self.to_ink(sample(self.src, self.X0, self.Y0), allw)
         self.G0 = self.gs.glyphs(self.I0, self.dither)
@@ -170,9 +276,11 @@ class FaceScene:
 
     def cell_rect(self, x0, y0, x1, y1):
         """Cells covering an avatar-px rectangle, as (row slice, col slice)."""
-        n = self.size
-        r0, r1 = max(0, int(y0 / n * self.rows)), min(self.rows, int(math.ceil(y1 / n * self.rows)))
-        c0, c1 = max(0, int(x0 / n * self.cols)), min(self.cols, int(math.ceil(x1 / n * self.cols)))
+        vx, vy, vw, vh = self.view
+        r0 = max(0, int((y0 - vy) / vh * self.rows))
+        r1 = min(self.rows, int(math.ceil((y1 - vy) / vh * self.rows)))
+        c0 = max(0, int((x0 - vx) / vw * self.cols))
+        c1 = min(self.cols, int(math.ceil((x1 - vx) / vw * self.cols)))
         return slice(r0, max(r0, r1)), slice(c0, max(c0, c1))
 
     @staticmethod
@@ -184,43 +292,68 @@ class FaceScene:
         return self.tone[(np.clip(B, 0, 1) * 255).astype(np.uint8)] * self.vignette[win]
 
     def to_src(self, x, y):
-        return (x - self.origin[0]) / self.scale, (y - self.origin[1]) / self.scale
+        vx, vy = self.view[:2]
+        return vx + (x - self.origin[0]) / self.scale, vy + (y - self.origin[1]) / self.scale
+
+    def to_screen(self, x, y):
+        vx, vy = self.view[:2]
+        return self.origin[0] + (x - vx) * self.scale, self.origin[1] + (y - vy) * self.scale
+
+    def in_view(self, sx, sy):
+        vx, vy, vw, vh = self.view
+        return vx <= sx < vx + vw and vy <= sy < vy + vh
 
     # ------------------------------------------------------------ interaction
     def click(self, x, y, now):
         sx, sy = self.to_src(x, y)
-        if 0 <= sx < self.size and 0 <= sy < self.size:
+        if self.in_view(sx, sy):
             self.ripples.append((sx, sy, now, 4.0))
 
-    def wake(self, beh, now):
-        """Small rings behind the pointer while it glides over the water."""
-        if not (self.fx["ripples"] and beh.moved and beh.ptr and beh.on_desktop) or now - self.last_wake < 0.12:
+    def pointer_effects(self, beh, now, dt):
+        """Rings behind the pointer on the water; brushing the hair aside as it passes."""
+        ptr, prev = beh.ptr, self.prev_ptr
+        self.prev_ptr = ptr
+        if not (beh.moved and ptr and prev and beh.on_desktop):
             return
-        sx, sy = self.to_src(*beh.ptr)
-        if 0 <= sx < self.size and self.geo["water"]["top"] <= sy < self.size:
+        sx, sy = self.to_src(*ptr)
+        if not self.in_view(sx, sy):
+            return
+        if self.fx["ripples"] and sy >= self.geo["water"]["top"] and now - self.last_wake >= 0.12:
             self.ripples.append((sx, sy, now, 1.6))
             self.last_wake = now
+        if self.fx["hair"] and self.hair_rows and now - self.last_brush >= 0.05 \
+                and sample_plain(self.hair_any, np.float32(sx), np.float32(sy)) > 0.15:
+            px, py = self.to_src(*prev)
+            vx, vy = (sx - px) / max(dt, 1e-3), (sy - py) / max(dt, 1e-3)
+            if math.hypot(vx, vy) > 5:
+                self.brushes.append((sx, sy, vx, vy, now))
+                self.brushes = self.brushes[-16:]
+                self.last_brush = now
 
-    # ------------------------------------------------------------ one frame
-    def ambient(self, now):
-        """Water, ripples and hair: the slow-moving part, recomputed at a lower rate and only
-        for the bands of rows they touch. Returns the feature-row bands that changed."""
+    # ------------------------------------------------------------ the slow layer
+    def ripple_rows(self, now):
+        """(ripple, feature-row range it can touch) for every live ripple."""
         fh = self.X0.shape[0]
-        to_row = lambda y: int(min(max(y / self.size * fh, 0), fh))
-        want = []
-        if self.fx["hair"] and self.hair_r1 > 0:
-            want.append((0, self.hair_r1))
-        if self.fx["water"] and self.water_r0 < fh:
-            want.append((self.water_r0, fh))
-        rip = []
-        for (rx, ry, t0, amp) in self.ripples:
+        vy, vh = self.view[1], self.view[3]
+        for rip in self.ripples:
+            rx, ry, t0, amp = rip
             age = now - t0
             radius, width = 55.0 * age, 14.0 + 6.0 * age
-            ya, yb = to_row(ry - radius - 2 * width), to_row(ry + radius + 2 * width) + 1
-            if ya < yb:
-                want.append((ya, yb))
-                rip.append((rx, ry, age, amp, radius, width, ya, yb))
-        # align to whole cell rows and merge
+            ya = int(min(max((ry - radius - 2 * width - vy) / vh * fh, 0), fh))
+            yb = int(min(max((ry + radius + 2 * width - vy) / vh * fh, 0), fh)) + 1
+            yield rip, age, radius, width, ya, min(yb, fh)
+
+    def ambient(self, now):
+        """Hair, water and ripples, recomputed at the ambient rate and only for the row bands
+        they touch. Returns the feature-row bands that changed."""
+        fh = self.X0.shape[0]
+        want = []
+        if self.fx["hair"] and self.hair_rows:
+            want.append(self.hair_rows)
+        if self.fx["water"] and self.water_r0 < fh:
+            want.append((self.water_r0, fh))
+        rip = [r for r in self.ripple_rows(now) if r[4] < r[5]]
+        want += [(r[4], r[5]) for r in rip]
         want = sorted((a - a % SUB_Y, min(fh, b + (-b) % SUB_Y)) for a, b in want)
         bands = []
         for a, b in want:
@@ -246,6 +379,7 @@ class FaceScene:
         self.bands = bands
 
         t = now
+        self.brushes = [b for b in self.brushes if now - b[4] < 1.6]
         for a, b in bands:
             X, Y = self.X0[a:b].copy(), self.Y0[a:b].copy()
             shade = np.zeros_like(X)                  # light and shadow on the water's surface
@@ -257,7 +391,7 @@ class FaceScene:
                 X[sl] += w * (0.8 * np.sin(0.09 * wy + 1.3 * t) + 0.5 * np.sin(0.05 * wy - 0.04 * wx + 0.8 * t))
                 Y[sl] += w * 0.5 * np.sin(0.07 * wx + 1.1 * t)
                 shade[sl] += w * 0.07 * np.sin(0.11 * wy - 0.03 * wx + 1.7 * t) * np.sin(0.05 * wx + 0.6 * t)
-            for (rx, ry, age, amp, radius, width, ya, yb) in rip:
+            for (rx, ry, t0, amp), age, radius, width, ya, yb in rip:
                 lo, hi = max(a, ya), min(b, yb)
                 if lo >= hi:
                     continue
@@ -270,54 +404,95 @@ class FaceScene:
                 X[lo - a:hi - a] += wave * dx / dist
                 Y[lo - a:hi - a] += wave * dy / dist
                 shade[lo - a:hi - a] -= 0.09 * wave       # dark troughs, bright crests
-            hi = min(b, self.hair_r1)
-            if self.fx["hair"] and a < hi:
-                X[:hi - a] += 1.4 * self.hair_w[a:hi] * np.sin(0.5 * t + 0.025 * self.Y0[a:hi])
+            if self.fx["hair"] and self.hair_rows:
+                ha, hb = self.hair_rows
+                lo, hi = max(a, ha), min(b, hb)
+                if lo < hi:
+                    dx, dy = self.hair_motion(t, now, lo - ha, hi - ha)
+                    X[lo - a:hi - a] -= dx                # sample from behind: the hair moves by +d
+                    Y[lo - a:hi - a] -= dy
             self.Xa[a:b], self.Ya[a:b] = X, Y
             win = (slice(a, b), slice(None))
             self.I[a:b] = self.to_ink(sample(self.src, X, Y) + shade, win)
             self.G[a // SUB_Y:b // SUB_Y] = self.gs.glyphs(self.I[a:b], self.dither[a:b])
-        return dirty
+        return dirty, rip
 
+    def hair_motion(self, t, now, r0, r1):
+        """How far each hair point is carried (dx, dy in avatar px), for hair-band rows r0:r1."""
+        A = self.hair_strength
+        gust = 0.6 * math.sin(0.33 * t) * math.sin(0.21 * t + 0.8) + 0.25 * math.sin(0.97 * t + 0.4)
+        shape = (r1 - r0, self.X0.shape[1])
+        dx, dy = np.zeros(shape, np.float32), np.zeros(shape, np.float32)
+        for (rs, cs), w, along, across, h in self.hair_band:
+            a, b = max(r0, rs.start), min(r1, rs.stop)          # this region's rows within r0:r1
+            if a >= b:
+                continue
+            k = slice(a - rs.start, b - rs.start)
+            w, along, across = w[k], along[k], across[k]
+            # sideways sway: two waves travelling down the strands, shifted from strand to strand
+            side = A * w * (0.55 * np.sin(0.045 * along - 1.7 * t + 0.06 * across)
+                            + 0.25 * np.sin(0.11 * along - 2.6 * t + 0.15 * across + 1.3) + 0.8 * gust)
+            slide = 0.35 * A * w * np.sin(0.03 * along - 1.2 * t + 0.05 * across)
+            dx[a - r0:b - r0, cs] += side * h["n"][0] + slide * h["t"][0]
+            dy[a - r0:b - r0, cs] += side * h["n"][1] + slide * h["t"][1]
+        if self.brushes:
+            ha = self.hair_rows[0]
+            hx, hy = self.X0[ha + r0:ha + r1], self.Y0[ha + r0:ha + r1]
+            m = self.hair_m[r0:r1]
+            for (bx, by, vx, vy, t0) in self.brushes:
+                age = now - t0
+                sp = math.hypot(vx, vy)
+                k = min(sp * 0.012, 4.5) * math.exp(-2.2 * age) * math.cos(7.0 * age)  # springs back
+                g = np.exp(-((hx - bx) ** 2 + (hy - by) ** 2) / (2 * 28.0 ** 2)) * m
+                dx = dx + g * k * vx / sp
+                dy = dy + g * k * vy / sp
+        return dx, dy
+
+    # ------------------------------------------------------------ one frame
     def frame(self, now, dt, beh):
-        self.wake(beh, now)
+        self.pointer_effects(beh, now, dt)
         self.ripples = [r for r in self.ripples if now - r[2] < 3.0][-24:]
         changed = False
         if now >= self.next_amb:
-            dirty = self.ambient(now)
-            rate = self.cfg.get("ambient_fps", 8) if not self.ripples else 20
-            self.next_amb = now + 1.0 / rate
-            for k, (ws, _) in enumerate(self.eye_win):   # bands crossing an eye wiped its patch
-                if any(a < ws.stop and ws.start < b for a, b in dirty):
-                    self.eye_cache[k] = None
-            changed = changed or bool(dirty)
+            dirty, rip = self.ambient(now)
+            rate = self.cfg.get("ambient_fps", 12)
+            self.next_amb = now + 1.0 / (max(rate, 20) if self.ripples else rate)
+            for k, (ws, cs) in enumerate(self.eye_win):
+                cache = self.eye_cache[k]
+                if cache is None or not any(a < ws.stop and ws.start < b for a, b in dirty):
+                    continue
+                if any(r[4] < ws.stop and ws.start < r[5] for r in rip):
+                    self.eye_cache[k] = None           # a ripple crosses this eye: repaint it
+                else:                                  # only overwritten: put the painted eye back
+                    self.I[ws, cs] = cache[1]
+                    self.G[self.eye_cells[k]] = cache[2]
+            changed = bool(dirty)
 
         for k, (e, win, cells) in enumerate(zip(self.eyes, self.eye_win, self.eye_cells)):
-            th = math.radians(e["angle"])
-            tx, ty, squint = beh.target(self.eye_screen[k], th)
+            tx, ty, squint = beh.target(self.eye_screen[k], e.theta)
             nx, ny = self.follow[k].step((tx, ty), dt, beh.jit)
             c = beh.lid(squint, ny, now)
-            # quantised so tiny changes that would not move a glyph skip the work
-            key = (round(nx * 40), round(ny * 30), round(c * 30), round(beh.pupil * 30))
+            key = (round(nx * 60), round(ny * 40), round(c * 40), round(beh.pupil * 40))
             cache = self.eye_cache[k]
             if cache is not None and cache[0] == key:
                 continue
-            X, Y = self.Xa[win].copy(), self.Ya[win].copy()
-            d = self.warp_eye(e, X, Y, nx, ny, c, beh.pupil)
-            patch = sample(self.src, X, Y)
-            if d is not None:
-                patch *= d
-            self.I[win] = self.to_ink(patch, win)
+            B, cls = self.paint_eye(e, self.Xa[win], self.Ya[win], nx, ny, c, beh.pupil)
+            self.I[win] = self.to_ink(B, win)
             self.G[cells] = self.gs.glyphs(self.I[win], self.dither[win])
-            self.eye_cache[k] = (key, self.iris_cells(e, cells, nx, ny, c))
+            r, w = cls.shape[0] // SUB_Y, cls.shape[1] // SUB_X
+            blocks = cls.reshape(r, SUB_Y, w, SUB_X)
+            cell_cls = np.where((blocks == 2).any(axis=(1, 3)), 5,
+                                np.where((blocks == 1).mean(axis=(1, 3)) > 0.5, 1, 0)).astype(np.uint8)
+            self.eye_cache[k] = (key, self.I[win].copy(), self.G[cells].copy(), cell_cls)
             changed = True
 
         glow_key = None
         if self.fx["glow"] and beh.ptr is not None and beh.on_desktop:
             sx, sy = self.to_src(*beh.ptr)
-            R = 0.2 * self.size
-            if -R < sx < self.size + R and -R < sy < self.size + R:
-                glow_key = (round(sx / 2), round(sy / 2))
+            R = 0.22 * self.view[3]
+            vx, vy, vw, vh = self.view
+            if vx - R < sx < vx + vw + R and vy - R < sy < vy + vh + R:
+                glow_key = (round(sx * 2), round(sy * 2))
         star_key = tuple(self.star_level(now, ph, per) for ph, per in self.star_phase)
         sig = (glow_key, star_key)
         if not changed and sig == self.last_sig:
@@ -326,76 +501,113 @@ class FaceScene:
 
         glyphs = self.G.copy()
         colors = np.zeros((self.rows, self.cols), np.uint8)
-        for cells, (key, iris) in zip(self.eye_cells, self.eye_cache):
-            colors[cells][iris] = 1
+        for cells, cache in zip(self.eye_cells, self.eye_cache):
+            if cache is not None:
+                sub, cc = colors[cells], cache[3]
+                sub[cc > 0] = cc[cc > 0]
         if glow_key is not None:
             self.glow(beh.ptr, glyphs, colors)
         self.twinkle(star_key, glyphs, colors)
         self.tiles.show(glyphs, colors)
 
-    def warp_eye(self, e, X, Y, nx, ny, c, pupil):
-        """Warp one eye's window (X, Y modified in place). Returns a darkening factor for the
-        lash line, or None."""
-        cx, cy = e["center"]
-        a, b = e["a"], e["b"]
-        th = math.radians(e["angle"])
-        co, si = math.cos(th), math.sin(th)
-        x, y = X.copy(), Y.copy()
-        dx, dy = x - cx, y - cy
-        u = dx * co + dy * si
-        v = -dx * si + dy * co
-        dn = np.sqrt((u / a) ** 2 + (v / b) ** 2)
-        inside = dn < 1
-        if not inside.any():
-            return None
-        half = b * np.sqrt(np.clip(1 - (u / a) ** 2, 0, 1))
-        edge = -half + 2 * half * c                        # where the upper lid's rim is now
-        lid = inside & (v < edge)
+    # ------------------------------------------------------------ the eyes
+    def paint_eye(self, e, X, Y, nx, ny, c, pupil):
+        """Paint one eye window. Returns (brightness, class) arrays: class 1 iris, 2 catchlight."""
+        src = self.src
+        T, Bt = e.top(X), e.bottom(X)
+        inx = (X > e.xl) & (X < e.xr)
+        Hh = np.maximum(Bt - T, 0)
+        ylid = T + c * Hh                                   # the upper lid's rim, now
+        Y_src = Y
+        if c > 0.01:
+            # the lid slides down: its lash line (the dark band just above the opening) moves
+            # with the rim, and the skin above the lashes stretches to cover the rest
+            LB, SK = e.lash, e.skin_h                       # lash band, skin taken above it
+            shift = c * Hh
+            top_skin = T - LB - SK
+            z = inx & (Y > top_skin) & (Y < ylid)
+            lashes = Y >= ylid - LB
+            skin = top_skin + (Y - top_skin) * SK / np.maximum(ylid - LB - top_skin, 1e-3)
+            Y_src = np.where(z, np.where(lashes, Y - shift, skin), Y)
+            lid_skin = z & ~lashes & (Y > T - LB)            # the part of the lid now over the eye
+        out = sample(src, X, Y_src)
+        if c > 0.01:                                         # lid skin in the skin's own tone
+            out = np.where(lid_skin, 0.6 * max(e.skin, 0.55) + 0.4 * out, out)
+        cls = np.zeros(X.shape, np.uint8)
+        open_ = inx & (Y >= ylid) & (Y <= Bt) & (Hh > 0.5)
+        if not open_.any():
+            return out, cls
 
-        # gaze: slide the eye's contents, fading out towards the rim
-        w = 1 - smoothstep(0.5, 1.0, dn)
-        gu, gv = nx * GAZE_U * a, ny * GAZE_V * b
-        us, vs = u - gu * w, v - gv * w
-        # pupil: radial zoom around the iris centre
-        ix, iy, ir = e["iris"]
-        iu = (ix - cx) * co + (iy - cy) * si
-        iv = -(ix - cx) * si + (iy - cy) * co
-        pu, pv = us - iu, vs - iv
-        rho = np.sqrt(pu * pu + pv * pv)
-        f = 1 + (1 / pupil - 1) * (1 - np.clip(rho / ir, 0, 1)) ** 2
-        us, vs = iu + pu * f, iv + pv * f
-        # lid: skin from above the eye, stretched down over the opening
-        lid_v = -half - (edge - v) * 0.7 - 1.5
-        us = np.where(lid, u, us)
-        vs = np.where(lid, lid_v, vs)
-        X[...] = np.where(inside, cx + us * co - vs * si, x)
-        Y[...] = np.where(inside, cy + us * si + vs * co, y)
-        if c < 0.08:
-            return None
-        rim = inside & (np.abs(v - edge) < 1.8)            # lashes along the moving lid
-        return np.where(rim, 0.25, 1.0).astype(np.float32)
+        x, y = X[open_], Y[open_]
+        top, bot = ylid[open_], Bt[open_]
+        h = np.maximum(bot - top, 1e-3)
+        dtop, dbot = y - top, bot - y
+        co, si = e.cos, e.sin
+        # where the iris is now: slid along the eye's axes, squeezed as the eyeball turns
+        gu = nx * (e.half - e.r) * 0.85
+        gv = ny * e.r * 0.45
+        mx, my = e.ix + gu * co - gv * si, e.iy + gu * si + gv * co
+        f = float(np.clip(math.sqrt(max(0.0, 1 - (gu / (e.half * 1.05)) ** 2)), 0.62, 1.0))
+        du, dv = x - mx, y - my
+        lu = (du * co + dv * si) / f
+        lv = -du * si + dv * co
+        rho = np.sqrt(lu * lu + lv * lv)
 
-    def iris_cells(self, e, cells, nx, ny, c):
-        """Which cells of an eye's window show the (moved) iris, for tinting."""
-        cx, cy = e["center"]
-        a, b = e["a"], e["b"]
-        th = math.radians(e["angle"])
-        co, si = math.cos(th), math.sin(th)
-        gu, gv = nx * GAZE_U * a, ny * GAZE_V * b
-        ix, iy, ir = e["iris"]
-        mx, my = ix + gu * co - gv * si, iy + gu * si + gv * co
-        CX, CY = self.CX[cells], self.CY[cells]
-        dx, dy = CX - cx, CY - cy
-        u = dx * co + dy * si
-        v = -dx * si + dy * co
-        half = b * np.sqrt(np.clip(1 - (u / a) ** 2, 0, 1))
-        opened = ((u / a) ** 2 + (v / b) ** 2 < 0.9) & (v > -half + 2 * half * c + 1)
-        return opened & ((CX - mx) ** 2 + (CY - my) ** 2 < (ir * 0.95) ** 2)
+        # the white: rounder in the middle, darker into the corners
+        uc = (x - e.cx) * co + (y - e.cy) * si
+        S = e.sclera * (0.8 + 0.2 * np.sin(np.pi * np.clip(dtop / h, 0, 1))) \
+            * (0.78 + 0.22 * np.clip(1 - (uc / e.half) ** 2, 0, 1))
+        val = S.copy()
+        cz = np.zeros(x.shape, np.uint8)
+        r = e.r
+        iz = rho < r + 1.0
+        if iz.any():
+            rr, ph = rho[iz], np.arctan2(lv[iz], lu[iz])
+            rp = r * 0.36 * pupil
+            t = np.clip((rr - rp) / (r - rp), 0, 1)
+            # the drawing's own iris, unwrapped around its centre so the pupil can change size
+            ro = r * 0.36 + t * r * 0.64
+            ca, sa = np.cos(ph), np.sin(ph)
+            sx = e.ix + ro * (ca * co - sa * si)
+            sy = e.iy + ro * (ca * si + sa * co)
+            hidden = (sy < e.top(sx) + 1.5) | (sy > e.bottom(sx) - 1.5)   # under a lid in the drawing:
+            sx = np.where(hidden, e.ix + ro * (ca * co + sa * si), sx)      # take the mirrored side
+            sy = np.where(hidden, e.iy + ro * (ca * si - sa * co), sy)
+            O = np.clip((sample(src, sx, sy) - e.iris_lo) / (e.iris_hi - e.iris_lo + 1e-3), 0, 1)
+            fib = 0.5 + 0.25 * np.sin(ph * 34 + 2.5 * np.sin(ph * 7) + t * 3.0) \
+                + 0.25 * np.sin(ph * 71 + 1.7 + 6.0 * t)
+            # kept in the mid tones so the fibres show as glyphs in both themes
+            iv = 0.2 + 0.6 * (0.4 * O + 0.6 * fib * (0.55 + 0.45 * t))
+            iv = iv + 0.14 * np.exp(-((t - 0.33) / 0.07) ** 2)        # collarette
+            iv = iv * (1 - 0.6 * smoothstep(0.8, 1.0, t))               # dark limbal ring
+            iv = iv * (0.5 + 0.5 * smoothstep(0.0, 0.12, t))            # pupil rim
+            iv = np.where(rr < rp, 0.02, iv)                            # pupil
+            a = smoothstep(r - 0.7, r + 0.5, rr)
+            val[iz] = iv * (1 - a) + S[iz] * a
+            cz[np.nonzero(iz)[0][rr < r]] = 1
+        val = val * (0.5 + 0.5 * smoothstep(0, 0.35 * h + 1, dtop))     # shadow of the upper lid
 
+        # catchlights: reflections of a window, lagging behind the iris
+        gx, gy = e.ix + 0.7 * (mx - e.ix), e.iy + 0.7 * (my - e.iy)
+        win = ((x - (gx - 0.34 * r)) / (0.15 * r)) ** 2 + ((y - (gy - 0.30 * r)) / (0.11 * r)) ** 2 < 1
+        dot = (x - (gx + 0.30 * r)) ** 2 + (y - (gy + 0.24 * r)) ** 2 < (0.07 * r) ** 2
+        shine = (win | dot) & (rho < r)
+        val = np.where(win & shine, 1.0, np.where(dot & shine, 0.92, val))
+        cz[shine] = 2
+
+        # blend into the drawn lid lines at the edges of the opening
+        w = smoothstep(0, 1.6, dtop) * smoothstep(0, 1.6, dbot) \
+            * smoothstep(0, 3.0, np.minimum(x - e.xl, e.xr - x))
+        border = np.where(dtop < dbot, sample(src, x, y - c * Hh[open_]), out[open_])
+        out[open_] = border + (val - border) * w
+        cls[open_] = cz
+        return out, cls
+
+    # ------------------------------------------------------------ light and sparkle
     def glow(self, ptr, glyphs, colors):
         """A soft light around the pointer: denser glyphs and brighter colours nearby."""
         sx, sy = self.to_src(*ptr)
-        R = 0.2 * self.size
+        R = 0.22 * self.view[3]
         cells = self.cell_rect(sx - R, sy - R, sx + R, sy + R)
         if cells[0].start >= cells[0].stop or cells[1].start >= cells[1].stop:
             return

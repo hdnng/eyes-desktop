@@ -26,8 +26,8 @@ from Xlib import X, Xatom, display as xdisplay
 from behaviour import Behaviour
 
 ROOT = Path(__file__).resolve().parent
-DEFAULTS = dict(scene="face", theme="dark", size=0.6, face_size=0.92, cell=5, position=[0.5, 0.5],
-                monitor="primary", fps=24, ambient_fps=6, idle_after=8.0, background=None, font=None, effects={})
+DEFAULTS = dict(scene="face", theme="dark", fit="cover", focus=None, size=0.6, face_size=0.92, cell=5, position=[0.5, 0.5],
+                monitor="primary", fps=24, ambient_fps=12, idle_after=8.0, background=None, font=None, effects={})
 THEMES = {  # same palette as the profile card
     "dark": dict(bg="#0f2027", art="#9fd8e6", value="#7ee0c8"),
     "light": dict(bg="#f6f8fa", art="#203a43", value="#0a7d6c"),

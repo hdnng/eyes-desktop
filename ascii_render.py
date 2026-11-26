@@ -121,3 +121,150 @@ class TiledCanvas:
             ph.paste(Image.fromarray(px))
             n += 1
         return n
+
+
+class XImageCanvas:
+    """Draws the glyph grid straight onto a Tk widget's X window with libX11's XPutImage.
+
+    The whole frame lives in one numpy buffer that an XImage points at; each frame only the
+    changed rectangles are sent, runs of neighbouring changed tiles merged into one request.
+    Much cheaper than Tk photo images. Raises on init if libX11 or a 24-bit TrueColor visual is
+    not available; callers fall back to TiledCanvas then."""
+
+    def __init__(self, widget, gs, rows, cols, x0, y0, bg, palette, tile=(3, 8)):
+        import ctypes
+        import ctypes.util
+        self.ct = ctypes
+        lib = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+        P, I, U = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint
+        lib.XOpenDisplay.restype = P
+        lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        lib.XDefaultScreen.argtypes = [P]
+        lib.XDefaultVisual.restype = P
+        lib.XDefaultVisual.argtypes = [P, I]
+        lib.XDefaultDepth.argtypes = [P, I]
+        lib.XCreateGC.restype = P
+        lib.XCreateGC.argtypes = [P, ctypes.c_ulong, ctypes.c_ulong, P]
+        lib.XCreateImage.restype = ctypes.POINTER(_XImage)
+        lib.XCreateImage.argtypes = [P, P, U, I, I, P, U, U, I, I]
+        lib.XPutImage.argtypes = [P, ctypes.c_ulong, P, ctypes.POINTER(_XImage), I, I, I, I, U, U]
+        lib.XFlush.argtypes = [P]
+        lib.XFreeGC.argtypes = [P, P]
+        lib.XCloseDisplay.argtypes = [P]
+        self.lib = lib
+        self.dpy = lib.XOpenDisplay(None)
+        if not self.dpy:
+            raise RuntimeError("cannot open X display")
+        scr = lib.XDefaultScreen(self.dpy)
+        if lib.XDefaultDepth(self.dpy, scr) != 24:
+            raise RuntimeError("needs a 24-bit display")
+        widget.update_idletasks()
+        self.win = widget.winfo_id()
+        self.gc = lib.XCreateGC(self.dpy, self.win, 0, None)
+        self.gs, self.rows, self.cols, self.tr, self.tc = gs, rows, cols, tile[0], tile[1]
+        self.x0, self.y0 = x0, y0
+        self.H, self.W = rows * gs.ch, cols * gs.cw
+        self.bg = np.array(bg, np.float32)
+        self.buf = np.empty((self.H, self.W, 4), np.uint8)
+        self.buf[...] = (bg[2], bg[1], bg[0], 0)
+        self.img = lib.XCreateImage(self.dpy, lib.XDefaultVisual(self.dpy, scr), 24, 2, 0,
+                                    self.buf.ctypes.data, self.W, self.H, 32, self.W * 4)
+        im = self.img.contents
+        if not (im.bits_per_pixel == 32 and im.byte_order == 0 and im.red_mask == 0xFF0000
+                and im.green_mask == 0xFF00 and im.blue_mask == 0xFF):
+            self.close()
+            raise RuntimeError("unsupported pixel format")
+        self.set_palette(palette)
+        # Tk clears exposed areas to the background in its idle redraw; repaint after it
+        self.widget = widget
+        widget.bind("<Expose>", lambda e: self.later_expose())
+        widget.bind("<Map>", lambda e: self.later_expose())
+
+    def set_palette(self, palette):
+        pal = np.asarray(palette, np.float32)[:, ::-1]                  # RGB -> BGR
+        a = self.gs.atlas.astype(np.float32)[None, :, :, :, None] / 255
+        bg = self.bg[::-1][None, None, None, None, :]
+        bgr = (bg + a * (pal[:, None, None, None, :] - bg)).round().astype(np.uint8)
+        self.catlas = np.concatenate([bgr, np.zeros(bgr.shape[:-1] + (1,), np.uint8)], axis=-1)
+        self.prev = None
+
+    def later_expose(self):
+        self.widget.after_idle(self.expose)
+        self.widget.after(60, self.expose)
+
+    def expose(self):
+        """Tk repainted the window background: send the whole frame again."""
+        if self.dpy and self.img:
+            self.put(0, 0, self.W, self.H)
+            self.lib.XFlush(self.dpy)
+
+    def put(self, x, y, w, h):
+        self.lib.XPutImage(self.dpy, self.win, self.gc, self.img, x, y, self.x0 + x, self.y0 + y, w, h)
+
+    def show(self, glyphs, colors):
+        gs = self.gs
+        if self.prev is None:
+            changed = np.ones(glyphs.shape, bool)
+        else:
+            changed = (glyphs != self.prev[0]) | (colors != self.prev[1])
+        self.prev = (glyphs.copy(), colors.copy())
+        R = -(-self.rows // self.tr) * self.tr
+        C = -(-self.cols // self.tc) * self.tc
+        pad = np.zeros((R, C), bool)
+        pad[:self.rows, :self.cols] = changed
+        hot = pad.reshape(R // self.tr, self.tr, C // self.tc, self.tc).any(axis=(1, 3))
+        n = 0
+        for i in np.nonzero(hot.any(1))[0]:
+            row = hot[i]
+            # runs of neighbouring changed tiles in this tile row
+            edges = np.diff(np.concatenate([[0], row.view(np.int8), [0]]))
+            for a, b in zip(np.nonzero(edges == 1)[0], np.nonzero(edges == -1)[0]):
+                r0, r1 = i * self.tr, min(self.rows, (i + 1) * self.tr)
+                c0, c1 = a * self.tc, min(self.cols, b * self.tc)
+                g, c = glyphs[r0:r1, c0:c1], colors[r0:r1, c0:c1]
+                px = self.catlas[c, g].transpose(0, 2, 1, 3, 4).reshape((r1 - r0) * gs.ch, (c1 - c0) * gs.cw, 4)
+                y, x = r0 * gs.ch, c0 * gs.cw
+                self.buf[y:y + px.shape[0], x:x + px.shape[1]] = px
+                self.put(x, y, px.shape[1], px.shape[0])
+                n += 1
+        if n:
+            self.lib.XFlush(self.dpy)
+        return n
+
+    def close(self):
+        if getattr(self, "img", None):
+            self.img.contents.data = None        # the pixels belong to numpy, not to Xlib
+            self.img = None
+        if getattr(self, "gc", None):
+            self.lib.XFreeGC(self.dpy, self.gc)
+            self.gc = None
+        if getattr(self, "dpy", None):
+            self.lib.XCloseDisplay(self.dpy)
+            self.dpy = None
+
+
+def _ximage_struct():
+    import ctypes
+    I, UL = ctypes.c_int, ctypes.c_ulong
+
+    class XImage(ctypes.Structure):
+        _fields_ = [("width", I), ("height", I), ("xoffset", I), ("format", I),
+                    ("data", ctypes.c_void_p), ("byte_order", I), ("bitmap_unit", I),
+                    ("bitmap_bit_order", I), ("bitmap_pad", I), ("depth", I),
+                    ("bytes_per_line", I), ("bits_per_pixel", I),
+                    ("red_mask", UL), ("green_mask", UL), ("blue_mask", UL)]
+    return XImage
+
+
+_XImage = _ximage_struct()
+
+
+def make_canvas(widget, *args, **kw):
+    """The fastest glyph canvas this display supports."""
+    import os
+    if os.environ.get("EYES_RENDERER") != "tk":
+        try:
+            return XImageCanvas(widget, *args, **kw)
+        except Exception as exc:                                       # pragma: no cover
+            print(f"note: direct X drawing unavailable ({exc}); using Tk images", flush=True)
+    return TiledCanvas(widget, *args, **kw)

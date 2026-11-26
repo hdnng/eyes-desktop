@@ -143,7 +143,7 @@ class Behaviour:
 
     def lid(self, squint, ny, now):
         """Upper lid closure 0 (open) .. 1 (shut): squint, a downward look, blinks."""
-        c = 0.9 * squint + 0.12 * max(ny, 0.0)
+        c = 0.9 * squint + 0.3 * max(ny, 0.0)
         for b in self.blinks:
             c += (1 - c) * blink_amount(now - b)
         return min(c, 1.0)
